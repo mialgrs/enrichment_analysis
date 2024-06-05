@@ -15,39 +15,40 @@ parser.add_argument('-f', '--filename', nargs='+', type=str,
 					help='path to ip then input bigwig file for chip')
 parser.add_argument('-b', '--bam', nargs='+', type=str, 
 					help='path to ip then input bamfile for chip')
+parser.add_argument('-s', '--binsize', type=int, help='binsize')
 parser.add_argument('-o', '--output', type=str, 
 					help='filename of the output (Dataframe)')
 args = parser.parse_args()
 
-def prepare_data(type_data:str, filename:List[str]):
+def prepare_data(type_data:str, filename:List[str], binsize:int):
 	""" """
 	ip_f = pbw.open(filename[0])
 	chr_len = ip_f.chroms()
 	chr_len.pop('chrY', None)
-	chr_len = {name:int(np.ceil(val/128)) for name, val in chr_len.items()}
+	chr_len = {name:int(np.ceil(val/binsize)) for name, val in chr_len.items()}
 	
 	all_ip = np.hstack([
-				ip_f.values(chr, 0, -1, numpy=True)[::128].astype(np.int16)
+				ip_f.values(chr, 0, -1, numpy=True)[::binsize].astype(np.int16)
 				for chr in tqdm(chr_len)])
 
 	if type_data == 'chip':
 		in_f = pbw.open(filename[1])
 		
 		all_in = np.hstack([
-				in_f.values(chr, 0, -1, numpy=True)[::128].astype(np.int16) 
+				in_f.values(chr, 0, -1, numpy=True)[::binsize].astype(np.int16) 
 				for chr in tqdm(chr_len)])
 		return chr_len, all_ip, all_in
 
 	return chr_len, all_ip
 
-def repeats_pos(repeats_df, chr_len:dict):
+def repeats_pos(repeats_df, chr_len:dict, binsize:int):
 	pos = {}
 	for chr in chr_len.keys():
 		dtf = repeats_df[(repeats_df.chrom == chr)]
 		pos[chr] = np.zeros(chr_len[chr], dtype=bool)
 		if not dtf.empty:
-			start = np.ceil(dtf.start/128)
-			end = dtf.end//128
+			start = np.ceil(dtf.start/binsize)
+			end = dtf.end//binsize
 			a = (np.unique(
 				np.concatenate(
 					[np.arange(i,j + 1) if i < j + 1 else np.empty(shape=0) for i,j in zip(start, end)])
@@ -106,12 +107,13 @@ def compute_enr(
 		chr_len:dict, 
 		counts_ip:np.ndarray, 
 		sum_counts_ip:np.ndarray, 
+		binsize:int, 
 		counts_in:np.ndarray = None, 
 		sum_counts_in:np.ndarray = None, 
 		frag=None
 		):
 
-	rep_pos = repeats_pos(repeats_df, chr_len)
+	rep_pos = repeats_pos(repeats_df, chr_len, binsize)
 	if type_data == 'chip':
 		enr = enrich(type_data, rep_pos, counts_ip, sum_counts_ip, counts_in, sum_counts_in)
 		return enr
@@ -137,9 +139,9 @@ if __name__ == "__main__":
 	if args.type_data == 'chip':
 		#rep_reads_ip = np.mean(sf.get_frag(args.bam[0], include_n_chroms=2, ignore_duplicates=True, mapping_qual=[0,1])) / 128 
 		#rep_reads_input = np.mean(sf.get_frag(args.bam[1], include_n_chroms=2, ignore_duplicates=True, mapping_qual=[0,1])) / 128 
-		rep_reads_ip, rep_reads_input = 250, 250
-		#print('frag len')
-		chr_len, all_ip, all_input = prepare_data(args.type_data, args.filename)
+		rep_reads_ip, rep_reads_input = 250/args.binsize, 250/args.binsize
+
+		chr_len, all_ip, all_input = prepare_data(args.type_data, args.filename, args.binsize)
 		sum_counts_ip = np.nansum(all_ip)
 		sum_counts_input = np.nansum(all_input)
 		print(sum_counts_ip, rep_reads_ip)
@@ -180,8 +182,10 @@ if __name__ == "__main__":
 		
 
 	else:
-		rep_reads = np.mean(sf.get_frag(args.bam[0], include_n_chroms=2, ignore_duplicates=True, mapping_qual=[0,1]))
-		chr_len, all_gen = prepare_data(args.type_data, args.filename)
+		rep_reads = np.mean(sf.get_frag(
+			args.bam[0], include_n_chroms=2, 
+			ignore_duplicates=True, mapping_qual=[0,1]))
+		chr_len, all_gen = prepare_data(args.type_data, args.filename, args.binsize)
 		sum_counts = np.nansum(all_gen)
 		N = np.round(sum_counts / rep_reads).astype(np.int32)
 
@@ -193,6 +197,7 @@ if __name__ == "__main__":
 					chr_len,
 					all_gen,
 					sum_counts,
+					args.binsize,
 					frag=rep_reads,
 				) for repeat in df.name.unique()
 			)
@@ -203,13 +208,12 @@ if __name__ == "__main__":
 	
 	res_df = res_df.assign(
 			pval=lambda x: [
-				#stats.binomtest(n, N, p=p, alternative='greater').pvalue 
-				#for n, p in zip(np.round(x.n).astype(int), x.proba)
 				stats.binomtest(n, N, p=p, alternative='two-sided').pvalue 
 				for n, p in zip(np.round(x.n).astype(int), x.proba)
 			]
 		)
 
-	res_df = res_df.merge(df[['name','repFamily','repClass']].drop_duplicates(), how='left', on='name')
+	res_df = res_df.merge(df[['name','repFamily','repClass']].drop_duplicates(), 
+					   how='left', on='name')
 	res_df.to_csv(args.output, sep='\t')
 	print(f"--- {(time.time() - start_time)/60:.2f} minutes ---")
